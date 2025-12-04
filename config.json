@@ -2,10 +2,12 @@
   "stockfish_path": "stockfish-windows-x86-64-avx2.exe",
   "engine_depth": 20,
   "engine_threads": 8,
+  "engine_hash": 256,
   "error_threshold": 200,
   "mate_score": 10000,
   "mate_depth_trigger": 5,
   "student_game_count_trigger": 5,
+  "forced_students": [],
   "thresholds": {
     "blunder": 300,
     "mistake": 200,

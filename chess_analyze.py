@@ -359,10 +359,20 @@ def main():
 
     try:
         logging.info("Запуск Stockfish...")
+        # Запускаем движок
         engine = chess.engine.SimpleEngine.popen_uci(config["stockfish_path"])
-        engine.configure({"Threads": config["engine_threads"]})
+        
+        # Настраиваем параметры (Ядра и Хеш)
+        engine_options = {
+            "Threads": config.get("engine_threads", 1), # По умолчанию 1, если в конфиге нет
+            "Hash": config.get("engine_hash", 16) # По умолчанию 16 МБ, если в конфиге нет
+        }
+        engine.configure(engine_options)
+        
+        logging.info(f"Движок запущен. Threads: {engine_options['Threads']}, Hash: {engine_options['Hash']}MB")
+
     except Exception as e:
-        logging.critical(f"ОШИБКА движка: {e}", exc_info=True)
+        logging.critical(f"ОШИБКА запуска движка: {e}", exc_info=True)
         return
 
     for f in pgn_files:
