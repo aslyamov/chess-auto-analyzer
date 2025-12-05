@@ -6,10 +6,13 @@ import chess
 import chess.pgn
 import chess.engine
 from collections import Counter
-import classifier
 
-# --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
-# Логи пишутся в файл chess_log.txt для детального разбора полетов
+# Импорт наших модулей
+import utils
+import opening
+import middlegame
+import registry
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(message)s",
@@ -20,365 +23,245 @@ logging.basicConfig(
 )
 
 def load_config(path="config.json"):
-    """Загружает настройки (путь к движку, пороги ошибок, список учеников)."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        logging.critical(f"Не удалось загрузить конфиг: {e}", exc_info=True)
+        logging.critical(f"Config Error: {e}")
         sys.exit(1)
 
 def get_pgn_files(directory="."):
-    """Ищет все файлы .pgn в папке, игнорируя уже проанализированные (_analyze.pgn)."""
-    files = []
-    for filename in os.listdir(directory):
-        if filename.endswith(".pgn") and not filename.endswith("_analyze.pgn"):
-            files.append(filename)
-    return files
+    return [f for f in os.listdir(directory) if f.endswith(".pgn") and not f.endswith("_analyze.pgn")]
 
 def normalize_name(name):
-    """Приводит имена к нижнему регистру для корректного сравнения."""
-    if not name: return "unknown"
-    return name.strip().lower()
+    return name.strip().lower() if name else "unknown"
 
 def find_all_students(pgn_files, config):
-    """
-    Сканирует все партии, считает, сколько раз встречался каждый игрок.
-    Возвращает список тех, кто сыграл больше N партий (или указан в конфиге).
-    """
     threshold = config.get("student_game_count_trigger", 6)
-    forced_list = config.get("forced_students", [])
-    forced_list_norm = {normalize_name(x) for x in forced_list}
+    forced = {normalize_name(x) for x in config.get("forced_students", [])}
+    counts = Counter()
     
-    logging.info("--- ПОИСК УЧЕНИКОВ ---")
-    player_counts = Counter()
-    total_games = 0
-    
-    for file_path in pgn_files:
+    logging.info("Поиск учеников...")
+    for path in pgn_files:
         try:
-            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
                 while True:
-                    try:
-                        headers = chess.pgn.read_headers(f)
-                    except ValueError: continue
-                    if headers is None: break
-                    
-                    w = normalize_name(headers.get("White", "Unknown"))
-                    b = normalize_name(headers.get("Black", "Unknown"))
-                    player_counts[w] += 1
-                    player_counts[b] += 1
-                    total_games += 1
-        except Exception as e:
-            logging.error(f"Ошибка чтения файла {file_path}: {e}")
-            continue
+                    h = chess.pgn.read_headers(f)
+                    if h is None: break
+                    counts[normalize_name(h.get("White", "?"))] += 1
+                    counts[normalize_name(h.get("Black", "?"))] += 1
+        except: continue
             
-    found_students = {name for name, count in player_counts.items() if count > threshold}
-    if forced_list_norm:
-        found_students.update(forced_list_norm)
+    students = {n for n, c in counts.items() if c > threshold}
+    students.update(forced)
     
-    logging.info(f"Всего партий: {total_games}")
-    if found_students:
-        logging.info(f"Найдено учеников: {len(found_students)}")
-        for st in sorted(found_students):
-            logging.info(f" [+] {st} (игр: {player_counts.get(st, 0)})")
-    else:
-        logging.warning("Ученики не найдены.")
-        
-    return found_students
+    if students: logging.info(f"Найдено учеников: {len(students)}")
+    else: logging.warning("Ученики не найдены.")
+    return students
 
-def process_game_logic(game, engine, config, students_list):
-    """
-    ОСНОВНАЯ ФУНКЦИЯ АНАЛИЗА ПАРТИИ.
-    
-    Этапы:
-    1. Инициализация (фильтр имен, создание трекеров дебюта).
-    2. Походовый перебор партии.
-    3. Проверка дебютных принципов (до 15 хода).
-    4. Анализ движком (Stockfish) на заданной глубине.
-    5. Поиск упущенного мата.
-    6. Поиск ошибок (зевков) и классификация тактики (вилки, связки и т.д.).
-    7. Запись комментариев в структуру PGN.
-    """
+def generate_reports(global_stats):
+    logging.info("Создание отчетов (TXT)...")
+    for name, data in global_stats.items():
+        safe = "".join([c for c in name if c.isalnum() or c in ' _-']).strip()
+        with open(f"Report_{safe}.txt", "w", encoding="utf-8") as f:
+            f.write(f"ОТЧЕТ: {name}\n{'='*30}\n\n")
+            
+            f.write(f"1. ДЕБЮТ (Партий: {data['games']}):\n")
+            if not data["op_errors"]: f.write("- Нет грубых ошибок.\n")
+            for k, v in data["op_errors"].items(): f.write(f"- {k}: {v}\n")
+            
+            f.write(f"\n2. ТАКТИКА И СТРАТЕГИЯ (Всего: {sum(data['tac_errors'].values())}):\n")
+            for k, v in sorted(data["tac_errors"].items()): f.write(f"- {k}: {v}\n")
+            
+            f.write(f"\n3. ТЕХНИКА (Не выиграно с перевесом +10): {data['tech_errors']}\n")
+
+def process_game(game, engine, config, students, global_stats):
     board = game.board()
     node = game
     
-    white_raw = game.headers.get('White', '?')
-    black_raw = game.headers.get('Black', '?')
-    white_name = normalize_name(white_raw)
-    black_name = normalize_name(black_raw)
+    w_raw = game.headers.get('White', '?')
+    b_raw = game.headers.get('Black', '?')
+    result = game.headers.get('Result', '*')
     
-    # Проверяем, есть ли наши ученики в этой партии
-    analyze_white = white_name in students_list
-    analyze_black = black_name in students_list
+    an_white = normalize_name(w_raw) in students
+    an_black = normalize_name(b_raw) in students
     
-    if not analyze_white and not analyze_black:
-        return False # Пропускаем партию
-        
-    logging.info(f"\n>>> Анализ партии: {white_raw} vs {black_raw}")
+    if not an_white and not an_black: return False
+    
+    logging.info(f"Анализ: {w_raw} vs {b_raw}")
+    
+    # Инициализация статистики
+    for name, active in [(w_raw, an_white), (b_raw, an_black)]:
+        if active:
+            if name not in global_stats:
+                global_stats[name] = {"games": 0, "op_errors": Counter(), "tac_errors": Counter(), "tech_errors": 0}
+            global_stats[name]["games"] += 1
 
-    # --- ИНИЦИАЛИЗАЦИЯ ДЕБЮТНОЙ СТАТИСТИКИ ---
-    opening_trackers = {}
-    
-    if analyze_white:
-        opening_trackers[chess.WHITE] = {
-            "center_control": False,
-            "has_castled": False,
-            "moved_pieces": set(),
-            "target_center": [chess.E4, chess.D4],
-            "checked": False
-        }
-    
-    if analyze_black:
-        opening_trackers[chess.BLACK] = {
-            "center_control": False,
-            "has_castled": False,
-            "moved_pieces": set(),
-            "target_center": [chess.E5, chess.D5],
-            "checked": False
-        }
+    # Трекеры дебюта
+    op_trackers = {}
+    if an_white: op_trackers[chess.WHITE] = {"center_control": False, "has_castled": False, "moved_pieces": set(), "target_center": [chess.E4, chess.D4], "checked": False}
+    if an_black: op_trackers[chess.BLACK] = {"center_control": False, "has_castled": False, "moved_pieces": set(), "target_center": [chess.E5, chess.D5], "checked": False}
+
+    # Флаг технической позиции (чтобы считать ошибку 1 раз за партию)
+    tech_advantage_flag = {chess.WHITE: False, chess.BLACK: False}
 
     while node.variations:
         next_node = node.variation(0)
         move = next_node.move
-        current_turn = board.turn
+        turn = board.turn # True=White
+        student_name = w_raw if turn == chess.WHITE else b_raw
         
-        # --- 1. СБОР ДАННЫХ ДЛЯ ДЕБЮТА ---
-        if current_turn in opening_trackers:
-            stats = opening_trackers[current_turn]
-            piece = board.piece_at(move.from_square)
-            
-            # Контроль центра пешкой
-            if piece and piece.piece_type == chess.PAWN:
-                if move.to_square in stats["target_center"]:
-                    stats["center_control"] = True
-            
-            # Рокировка
-            if board.is_castling(move):
-                stats["has_castled"] = True
-            
-            # Развитие (запоминаем откуда ходили)
-            stats["moved_pieces"].add(move.from_square)
+        # Сбор данных дебюта
+        if turn in op_trackers:
+            st = op_trackers[turn]
+            p = board.piece_at(move.from_square)
+            if p and p.piece_type == chess.PAWN and move.to_square in st["target_center"]: st["center_control"] = True
+            if board.is_castling(move): st["has_castled"] = True
+            st["moved_pieces"].add(move.from_square)
         
-        # Проверяем, нужно ли анализировать движком текущий ход
-        should_analyze = (current_turn == chess.WHITE and analyze_white) or \
-                         (current_turn == chess.BLACK and analyze_black)
-            
+        should_analyze = (turn == chess.WHITE and an_white) or (turn == chess.BLACK and an_black)
+
         if not should_analyze:
-            # Если ход соперника, просто обновляем доску, но проверим дебют (если пришло время)
-            if current_turn in opening_trackers and not opening_trackers[current_turn]["checked"]:
-                if board.fullmove_number == 15:
-                    report = classifier.check_opening_principles(opening_trackers[current_turn], current_turn)
-                    if report:
-                        logging.info(f"   [DEBUT] {white_raw if current_turn else black_raw}: {report}")
-                        if next_node.comment: next_node.comment += f" {report}"
-                        else: next_node.comment = report
-                    opening_trackers[current_turn]["checked"] = True
+            # Проверка дебюта (15 ход) на ходе соперника
+            if turn in op_trackers and not op_trackers[turn]["checked"] and board.fullmove_number == 15:
+                rep = opening.check_opening_principles(op_trackers[turn], turn)
+                if rep:
+                    msg = f" [DEBUT] {rep}"
+                    if next_node.comment: next_node.comment += msg
+                    else: next_node.comment = msg
+                    for k in ["не захватил центр", "не сделал рокировку", "не развил фигуры"]:
+                        if k in rep: global_stats[student_name]["op_errors"][k] += 1
+                op_trackers[turn]["checked"] = True
+            
+            board.push(move); node = next_node; continue
 
-            board.push(move)
-            node = next_node
-            continue
-
-        # --- 2. ЗАПУСК ДВИЖКА (STOCKFISH) ---
+        # --- ЗАПУСК ДВИЖКА ---
         try:
             limit = chess.engine.Limit(depth=config["engine_depth"])
             info = engine.analyse(board, limit, multipv=1)
             if isinstance(info, list): info = info[0]
-            
-            # Защита от пустых PV (пат/мат)
-            if "pv" not in info or not info["pv"]:
+            if "pv" not in info:
                 board.push(move); node = next_node; continue
 
             best_move = info["pv"][0]
+            score = info["score"].relative
             
-            # Если ученик сыграл по первой линии (лучший ход)
+            # 1. ТЕХНИЧЕСКАЯ ПОЗИЦИЯ
+            if middlegame.check_technical_conversion(score, 1000, result, turn, (turn == chess.WHITE)):
+                if not tech_advantage_flag[turn]:
+                    tech_advantage_flag[turn] = True
+                    global_stats[student_name]["tech_errors"] += 1
+                    msg = " [Не реализовал перевес +10]"
+                    if next_node.comment: next_node.comment += msg
+                    else: next_node.comment = msg
+
             if move == best_move:
-                # Все равно проверяем дебют
-                if current_turn in opening_trackers and not opening_trackers[current_turn]["checked"]:
-                    if board.fullmove_number == 15:
-                        report = classifier.check_opening_principles(opening_trackers[current_turn], current_turn)
-                        if report:
-                            logging.info(f"   [DEBUT] {white_raw if current_turn else black_raw}: {report}")
-                            if next_node.comment: next_node.comment += f" {report}"
-                            else: next_node.comment = report
-                        opening_trackers[current_turn]["checked"] = True
+                # Проверка дебюта (даже при лучшем ходе)
+                if turn in op_trackers and not op_trackers[turn]["checked"] and board.fullmove_number == 15:
+                    rep = opening.check_opening_principles(op_trackers[turn], turn)
+                    if rep:
+                        msg = f" [DEBUT] {rep}"
+                        if next_node.comment: next_node.comment += msg
+                        else: next_node.comment = msg
+                        for k in ["не захватил центр", "не сделал рокировку", "не развил фигуры"]:
+                            if k in rep: global_stats[student_name]["op_errors"][k] += 1
+                    op_trackers[turn]["checked"] = True
                 
                 board.push(move); node = next_node; continue
-                
-            best_score = info["score"].relative
-            mate_issue_found = False
-            
-            # --- 3. ПРОВЕРКА НА УПУЩЕННЫЙ МАТ ---
-            if best_score.is_mate() and 0 < best_score.mate() <= config["mate_depth_trigger"]:
-                mate_moves = best_score.mate()
-                board.push(move); board.pop() 
-                
-                # Проверяем оценку ПОСЛЕ хода ученика
-                info_user = engine.analyse(board, limit, root_moves=[move])
-                if isinstance(info_user, list): info_user = info_user[0]
-                user_score_real = info_user["score"].relative
-                user_mate = user_score_real.mate()
 
-                # Если мат пропал или стал длиннее
-                if not user_score_real.is_mate() or (user_mate > 0 and user_mate > mate_moves):
-                    logging.info(f"   [!] Ход {board.fullmove_number}: Упущен МАТ в {mate_moves}. Вариант: {best_move}")
-                    next_node.nags.add(chess.pgn.NAG_BLUNDER)
-                    variation_root = node.add_variation(best_move)
-                    current_var_node = variation_root
-                    
-                    # Добавляем вариант движка
-                    sim_board = board.copy()
-                    sim_board.push(best_move)
-                    if "pv" in info and len(info["pv"]) > 1:
-                        for pv_move in info["pv"][1:]:
-                            current_var_node = current_var_node.add_main_variation(pv_move)
-                            sim_board.push(pv_move)
-                    current_var_node.comment = classifier.get_mate_comment(mate_moves)
-                    mate_issue_found = True
-
-            # --- 4. ПРОВЕРКА СТАНДАРТНЫХ ОШИБОК И КЛАССИФИКАЦИЯ ---
-            if not mate_issue_found:
+            # 2. АНАЛИЗ ОШИБОК
+            mate_found = False
+            # Упущенный мат
+            if score.is_mate() and 0 < score.mate() <= config["mate_depth_trigger"]:
+                mate_in = score.mate()
                 board.push(move); board.pop()
-                info_user = engine.analyse(board, limit, root_moves=[move])
-                if isinstance(info_user, list): info_user = info_user[0]
-                user_score = info_user["score"].relative
+                u_info = engine.analyse(board, limit, root_moves=[move])
+                u_score = u_info["score"].relative
+                u_mate = u_score.mate() if u_score.is_mate() else 0
                 
-                score_diff = classifier.calculate_score_difference(best_score, user_score, board.turn, config["mate_score"])
-                nag, _ = classifier.get_error_type(score_diff, config)
-                
-                # Если разница в оценке больше порога ошибки
-                if nag and score_diff >= config["error_threshold"]:
-                    next_node.nags.add(nag)
-                    variation_root = node.add_variation(best_move)
-                    
-                    tags = []
-                    try:
-                        # 4.1. Зевки
-                        if classifier.is_missed_hanging_piece(board, best_move): tags.append("Не забрал фигуру")
-                        elif classifier.is_moving_into_danger(board, move): tags.append("Подставил фигуру")
-                        
-                        # 4.2. Сложная тактика
-                        if classifier.is_double_check(board, best_move): tags.append("Двойной шах")
-                        elif classifier.is_discovered_check(board, best_move): tags.append("Вскрытый шах")
-                        elif classifier.is_discovered_attack(board, best_move): tags.append("Вскрытое нападение")
-                            
-                        # 4.3. Базовая тактика
-                        if classifier.is_fork(board, best_move): tags.append("Вилка")
-                        if classifier.is_skewer(board, best_move): tags.append("Линейный удар")
-                        if classifier.is_pin(board, best_move): tags.append("Связка")
-                            
-                    except Exception as e_class:
-                        logging.warning(f"Ошибка классификатора: {e_class}")
+                if not u_score.is_mate() or (u_mate > 0 and u_mate > mate_in):
+                    lbl = f"Не нашел мат в {mate_in}"
+                    global_stats[student_name]["tac_errors"][lbl] += 1
+                    next_node.nags.add(chess.pgn.NAG_BLUNDER)
+                    var = node.add_variation(best_move)
+                    var.comment = utils.get_mate_comment(mate_in)
+                    mate_found = True
 
-                    # Логирование для отладки
+            # Тактика и стратегия через REJISTRY
+            if not mate_found:
+                board.push(move); board.pop()
+                u_info = engine.analyse(board, limit, root_moves=[move])
+                u_score = u_info["score"].relative
+                
+                diff = utils.calculate_score_difference(score, u_score, turn, config["mate_score"])
+                nag = utils.get_error_type(diff, config)
+                
+                if nag and diff >= config["error_threshold"]:
+                    # --- ПОЛУЧАЕМ ТЕГИ ЧЕРЕЗ РЕЕСТР ---
+                    tags = registry.get_all_tags(board, move, best_move)
+                    
                     if tags:
-                        logging.info(f"   [x] Ход {board.fullmove_number}: Ошибка. Мотивы: {', '.join(tags)}")
+                        for t in tags: global_stats[student_name]["tac_errors"][t] += 1
                     else:
-                        logging.info(f"   [x] Ход {board.fullmove_number}: Ошибка (Loss: {score_diff})")
-
-                    comment_string = ", ".join(tags)
-                    
-                    # Добавляем вариант движка
-                    current_var_node = variation_root
-                    sim_board = board.copy()
-                    sim_board.push(best_move)
-                    if "pv" in info and len(info["pv"]) > 1:
-                        for i, pv_move in enumerate(info["pv"][1:]):
-                            if i >= 4: break 
-                            current_var_node = current_var_node.add_main_variation(pv_move)
-                            sim_board.push(pv_move)
-                            
-                    # Пишем теги в комментарий
-                    if comment_string:
-                        current_var_node.comment = comment_string
+                        global_stats[student_name]["tac_errors"]["Прочие ошибки"] += 1
+                        
+                    next_node.nags.add(nag)
+                    var = node.add_variation(best_move)
+                    if tags: var.comment = ", ".join(tags)
 
         except Exception as e:
-            logging.error(f"СБОЙ на ходу {board.fullmove_number}: {e}", exc_info=True)
-        
-        # --- 5. ФИНАЛЬНАЯ ПРОВЕРКА ДЕБЮТА ---
-        # (На случай если выше сработал continue)
-        if current_turn in opening_trackers and not opening_trackers[current_turn]["checked"]:
-            if board.fullmove_number == 15:
-                report = classifier.check_opening_principles(opening_trackers[current_turn], current_turn)
-                if report:
-                    logging.info(f"   [DEBUT] {white_raw if current_turn else black_raw}: {report}")
-                    if next_node.comment: next_node.comment += f" {report}"
-                    else: next_node.comment = report
-                opening_trackers[current_turn]["checked"] = True
+            logging.error(f"Move error: {e}")
+
+        # Проверка дебюта (повтор для надежности)
+        if turn in op_trackers and not op_trackers[turn]["checked"] and board.fullmove_number == 15:
+            rep = opening.check_opening_principles(op_trackers[turn], turn)
+            if rep:
+                msg = f" [DEBUT] {rep}"
+                if next_node.comment: next_node.comment += msg
+                else: next_node.comment = msg
+                for k in ["не захватил центр", "не сделал рокировку", "не развил фигуры"]:
+                    if k in rep: global_stats[student_name]["op_errors"][k] += 1
+            op_trackers[turn]["checked"] = True
 
         board.push(move)
         node = next_node
-    
     return True
 
-def analyze_single_file(input_file, engine, config, students_list):
-    """Обрабатывает один PGN файл: читает партии, запускает анализ, сохраняет результат."""
-    base_name = os.path.splitext(input_file)[0]
-    output_file = f"{base_name}_analyze.pgn"
-    logging.info(f"=== Обработка файла: {input_file} ===")
-
-    with open(input_file, "r", encoding="utf-8", errors="replace") as pgn_in, \
-         open(output_file, "w", encoding="utf-8") as pgn_out:
-        exporter = chess.pgn.FileExporter(pgn_out)
-        games_total = 0; games_analyzed = 0
-        
-        while True:
-            try:
-                game = chess.pgn.read_game(pgn_in)
-            except ValueError as e:
-                logging.warning(f"Битая PGN запись: {e}")
-                continue
-            if game is None: break
-            
-            games_total += 1
-            try:
-                was_analyzed = process_game_logic(game, engine, config, students_list)
-                if was_analyzed:
-                    games_analyzed += 1
-                    print(f"\rАнализируем партию {games_analyzed}...", end="")
-                game.accept(exporter)
-            except Exception as e:
-                logging.critical(f"Критическая ошибка в партии: {e}", exc_info=True)
-            
-        logging.info(f"Файл готов: {output_file}. (Всего: {games_total}, Проверено: {games_analyzed})")
-        print(f"\nФайл готов: {output_file}")
-
 def main():
-    # Очистка лога при каждом запуске
-    with open("chess_log.txt", "w", encoding="utf-8") as f:
-        f.write("=== НОВЫЙ ЗАПУСК ===\n")
-        
-    config = load_config("config.json")
-    pgn_files = get_pgn_files()
+    with open("chess_log.txt", "w", encoding="utf-8") as f: f.write("START\n")
+    config = load_config()
+    files = get_pgn_files()
+    if not files: return
     
-    if not pgn_files:
-        logging.warning("PGN файлы не найдены.")
-        return
+    students = find_all_students(files, config)
+    if not students: return
     
-    students_list = find_all_students(pgn_files, config)
-    if not students_list: return
-
     try:
-        logging.info("Запуск Stockfish...")
-        # Запускаем движок
+        logging.info("Запуск движка...")
         engine = chess.engine.SimpleEngine.popen_uci(config["stockfish_path"])
-        
-        # Настраиваем параметры (Ядра и Хеш)
-        engine_options = {
-            "Threads": config.get("engine_threads", 1), # По умолчанию 1, если в конфиге нет
-            "Hash": config.get("engine_hash", 16) # По умолчанию 16 МБ, если в конфиге нет
-        }
-        engine.configure(engine_options)
-        
-        logging.info(f"Движок запущен. Threads: {engine_options['Threads']}, Hash: {engine_options['Hash']}MB")
-
+        engine.configure({
+            "Threads": config.get("engine_threads", 1),
+            "Hash": config.get("engine_hash", 16)
+        })
     except Exception as e:
-        logging.critical(f"ОШИБКА запуска движка: {e}", exc_info=True)
-        return
-
-    for f in pgn_files:
-        analyze_single_file(f, engine, config, students_list)
+        logging.critical(f"Engine fail: {e}"); return
+        
+    global_stats = {}
+    
+    for f in files:
+        base = os.path.splitext(f)[0]
+        out = f"{base}_analyze.pgn"
+        with open(f, "r", encoding="utf-8", errors="replace") as pin, open(out, "w", encoding="utf-8") as pout:
+            exp = chess.pgn.FileExporter(pout)
+            while True:
+                g = chess.pgn.read_game(pin)
+                if g is None: break
+                if process_game(g, engine, config, students, global_stats):
+                    g.accept(exp)
+                    
     engine.quit()
-    logging.info("ВСЕ ГОТОВО.")
+    generate_reports(global_stats)
+    logging.info("DONE")
 
 if __name__ == "__main__":
     main()
