@@ -253,8 +253,10 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
                 
                 board.push(move); node = next_node; continue
 
-            # === 3. ТАКТИКА ===
+            # === 3. ТАКТИКА И МАТ ===
             mate_found = False
+            
+            # --- УПУЩЕННЫЙ МАТ (ИСПРАВЛЕНО: ПИШЕМ ПОЛНЫЙ ВАРИАНТ) ---
             if score.is_mate() and 0 < score.mate() <= config["mate_depth_trigger"]:
                 mate_in = score.mate()
                 board.push(move); board.pop()
@@ -265,11 +267,22 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
                 if not u_score.is_mate() or (u_mate > 0 and u_mate > mate_in):
                     lbl = f"Не нашел мат в {mate_in}"
                     global_stats[student_name]["tac_errors"][lbl] += 1
+                    
                     next_node.nags.add(chess.pgn.NAG_BLUNDER)
-                    var = node.add_variation(best_move)
-                    var.comment = utils.get_mate_comment(mate_in)
+                    
+                    # 1. Создаем вариацию с первым ходом
+                    var_node = node.add_variation(best_move)
+                    
+                    # 2. Дописываем остальные ходы из PV (Principal Variation)
+                    if "pv" in info and len(info["pv"]) > 1:
+                        current_var = var_node
+                        for pv_move in info["pv"][1:]:
+                            current_var = current_var.add_main_variation(pv_move)
+                    
+                    var_node.comment = utils.get_mate_comment(mate_in)
                     mate_found = True
 
+            # --- ОБЫЧНЫЕ ОШИБКИ (ТОЖЕ ПИШЕМ ПОЛНЫЙ ВАРИАНТ) ---
             if not mate_found:
                 board.push(move); board.pop()
                 u_info = engine.analyse(board, limit, root_moves=[move])
@@ -280,6 +293,7 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
                 
                 if nag and diff >= config["error_threshold"]:
                     tags = registry.get_tactical_tags(board, move, best_move)
+                    
                     if tags:
                         for t in tags: global_stats[student_name]["tac_errors"][t] += 1
                         logging.info(f"   [x] Ошибка (Ход {board.fullmove_number}): {', '.join(tags)}")
@@ -288,9 +302,20 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
                         logging.info(f"   [x] Ошибка (Ход {board.fullmove_number}): Loss {diff}")
                         
                     next_node.nags.add(nag)
-                    var = node.add_variation(best_move)
+                    
+                    # 1. Создаем вариацию с первым ходом
+                    var_node = node.add_variation(best_move)
+                    
+                    # 2. Дописываем вариант (чтобы видеть, как именно выигрывается фигура)
+                    # Ограничим длину 5-6 ходами, чтобы не засорять PGN слишком длинными вариантами
+                    if "pv" in info and len(info["pv"]) > 1:
+                        current_var = var_node
+                        for i, pv_move in enumerate(info["pv"][1:]):
+                            if i > 5: break # Максимум 6 полуходов (3 полных хода)
+                            current_var = current_var.add_main_variation(pv_move)
+                    
                     all_comments = tags 
-                    if all_comments: var.comment = ", ".join(all_comments)
+                    if all_comments: var_node.comment = ", ".join(all_comments)
 
         except Exception as e:
             logging.error(f"Move error: {e}")
