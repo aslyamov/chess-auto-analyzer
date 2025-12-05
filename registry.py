@@ -1,14 +1,12 @@
 import tactics
 import middlegame
 
-# ОШИБКИ ИГРОКА (Blunders)
-# (Функция проверки хода игрока, Текст ошибки)
+# ОШИБКИ ИГРОКА (Blunders) - Проверяем, когда оценка упала
 BLUNDER_CHECKS = [
     (tactics.is_moving_into_danger, "Подставил фигуру"),
 ]
 
-# ТАКТИКА (Tactics) - что упустил игрок (проверяем лучший ход)
-# (Функция проверки лучшего хода, Текст)
+# ТАКТИКА (Tactics) - Проверяем, когда оценка упала (упущенные возможности)
 TACTICAL_CHECKS = [
     (tactics.is_fork, "Вилка"),
     (tactics.is_pin, "Связка"),
@@ -19,35 +17,44 @@ TACTICAL_CHECKS = [
     (tactics.is_missed_hanging_piece, "Не забрал фигуру"),
 ]
 
-# СТРАТЕГИЯ (Strategy) - сравниваем До и После
+# СТРАТЕГИЯ (Strategy) - Проверяем ВСЕГДА (стиль игры)
 STRATEGY_CHECKS = [
     (middlegame.is_doubled_pawn_created, "Сдвоил пешки"),
     (middlegame.is_isolated_pawn_created, "Изолировал пешку"),
     (middlegame.missed_open_file, "Не занял открытую линию"),
 ]
 
-def get_all_tags(board, move, best_move):
-    """Прогоняет все проверки и возвращает список тегов."""
+def get_strategy_tags(board, move, best_move):
+    """
+    Проверяет стратегические особенности хода.
+    Вызывается на КАЖДОМ ходу ученика.
+    """
     tags = []
-
-    # 1. Ошибки игрока
-    for func, label in BLUNDER_CHECKS:
-        if func(board, move): tags.append(label)
-
-    # 2. Тактика (на лучшем ходе)
-    for func, label in TACTICAL_CHECKS:
-        if func(board, best_move): tags.append(label)
-
-    # 3. Стратегия
     board_after = board.copy()
     board_after.push(move)
 
     for func, label in STRATEGY_CHECKS:
         if func == middlegame.missed_open_file:
-             # Для открытых линий сигнатура отличается
+             # Особая сигнатура для открытых линий
              if func(board, best_move, move): tags.append(label)
         else:
-             # ИСПРАВЛЕНИЕ: Убрали лишний "board" в начале
+             # Стандартная сигнатура (до, после, ход)
              if func(board_before=board, board_after=board_after, move=move): tags.append(label)
+    return tags
+
+def get_tactical_tags(board, move, best_move):
+    """
+    Проверяет тактические зевки и упущенные возможности.
+    Вызывается ТОЛЬКО если оценка упала (ошибка).
+    """
+    tags = []
+
+    # 1. Ошибки игрока (Blunders)
+    for func, label in BLUNDER_CHECKS:
+        if func(board, move): tags.append(label)
+
+    # 2. Тактика (на лучшем ходе - что упустил)
+    for func, label in TACTICAL_CHECKS:
+        if func(board, best_move): tags.append(label)
 
     return tags
