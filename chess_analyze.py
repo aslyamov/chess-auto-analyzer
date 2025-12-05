@@ -38,26 +38,64 @@ def normalize_name(name):
 
 def find_all_students(pgn_files, config):
     threshold = config.get("student_game_count_trigger", 6)
-    forced = {normalize_name(x) for x in config.get("forced_students", [])}
-    counts = Counter()
+    forced_list = config.get("forced_students", [])
+    forced_list_norm = {normalize_name(x) for x in forced_list}
     
     logging.info("Поиск учеников...")
-    for path in pgn_files:
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                while True:
-                    h = chess.pgn.read_headers(f)
-                    if h is None: break
-                    counts[normalize_name(h.get("White", "?"))] += 1
-                    counts[normalize_name(h.get("Black", "?"))] += 1
-        except: continue
-            
-    students = {n for n, c in counts.items() if c > threshold}
-    students.update(forced)
     
-    if students: logging.info(f"Найдено учеников: {len(students)}")
-    else: logging.warning("Ученики не найдены.")
-    return students
+    # === НОВАЯ ЛОГИКА ===
+    # Если 0, то авто-поиск отключен, берем только список
+    if threshold == 0:
+        logging.info("Авто-поиск по количеству игр отключен (trigger=0).")
+        
+        if not forced_list_norm:
+            msg = "!!! ОШИБКА: Вы поставили student_game_count_trigger=0, но список forced_students пуст. Программе некого анализировать."
+            logging.error(msg)
+            print(f"\n{msg}\n")
+            return set()
+            
+        logging.info(f"Будут проанализированы только игроки из списка: {len(forced_list_norm)} чел.")
+        return forced_list_norm
+
+    # === СТАРАЯ ЛОГИКА (ЕСЛИ > 0) ===
+    player_counts = Counter()
+    total_games = 0
+    
+    for file_path in pgn_files:
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                while True:
+                    try:
+                        headers = chess.pgn.read_headers(f)
+                    except ValueError: continue
+                    if headers is None: break
+                    w = normalize_name(headers.get("White", "Unknown"))
+                    b = normalize_name(headers.get("Black", "Unknown"))
+                    player_counts[w] += 1
+                    player_counts[b] += 1
+                    total_games += 1
+        except Exception as e:
+            logging.error(f"Ошибка чтения файла {file_path}: {e}")
+            continue
+            
+    found_students = {name for name, count in player_counts.items() if count > threshold}
+    # Добавляем принудительных, даже если они не набрали игр
+    if forced_list_norm:
+        found_students.update(forced_list_norm)
+    
+    logging.info(f"Всего партий просканировано: {total_games}")
+    if found_students:
+        logging.info(f"Найдено учеников для анализа: {len(found_students)}")
+        # Выводим инфо только по тем, кого нашли сканированием
+        for st in sorted(found_students):
+            cnt = player_counts.get(st, 0)
+            # Если 0, значит он из forced list и мы его не встречали при сканировании (или файл не тот)
+            info_str = f"{cnt}" if cnt > 0 else "Forced List"
+            logging.info(f" [+] {st} (игр: {info_str})")
+    else:
+        logging.warning("Ученики не найдены.")
+        
+    return found_students
 
 def generate_reports(global_stats):
     logging.info("Создание отчетов (TXT)...")
