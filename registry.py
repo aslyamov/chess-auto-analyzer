@@ -44,8 +44,10 @@ def get_all_tags(board, move, best_move):
 
     for func, label in STRATEGY_CHECKS:
         if func == middlegame.missed_open_file:
+             # Для открытых линий сигнатура отличается
              if func(board, best_move, move): tags.append(label)
         else:
-             if func(board, board_before=board, board_after=board_after, move=move): tags.append(label)
+             # ИСПРАВЛЕНИЕ: Убрали лишний "board" в начале
+             if func(board_before=board, board_after=board_after, move=move): tags.append(label)
 
     return tags
