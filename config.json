@@ -1,4 +1,6 @@
 {
+  "input_folder": "pgn",
+  "output_folder": "pgn_analyzed",
   "stockfish_path": "stockfish-windows-x86-64-avx2.exe",
   "engine_depth": 20,
   "engine_threads": 8,

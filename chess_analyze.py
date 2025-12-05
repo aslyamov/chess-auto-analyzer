@@ -13,25 +13,48 @@ import opening
 import middlegame
 import registry
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(message)s",
-    handlers=[
-        logging.FileHandler("chess_log.txt", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# Настройка логгера будет происходить после загрузки конфига
+def setup_logging(output_folder):
+    log_file = os.path.join(output_folder, "chess_log.txt")
+    
+    # Сбрасываем старые хендлеры, если были
+    root_logger = logging.getLogger()
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+        
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(message)s",
+        handlers=[
+            logging.FileHandler(log_file, encoding="utf-8"),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
 
 def load_config(path="config.json"):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        logging.critical(f"Config Error: {e}")
+        # Здесь логгер еще не настроен, пишем просто в консоль
+        print(f"[CRITICAL] Не удалось загрузить конфиг: {e}")
         sys.exit(1)
 
-def get_pgn_files(directory="."):
-    return [f for f in os.listdir(directory) if f.endswith(".pgn") and not f.endswith("_analyze.pgn")]
+def get_pgn_files(input_folder):
+    files = []
+    if not os.path.exists(input_folder):
+        logging.warning(f"Папка '{input_folder}' не найдена. Создаю новую.")
+        try:
+            os.makedirs(input_folder)
+        except Exception as e:
+            logging.error(f"Не удалось создать папку {input_folder}: {e}")
+        return []
+
+    for f in os.listdir(input_folder):
+        if f.endswith(".pgn"):
+            # Формируем полный путь
+            files.append(os.path.join(input_folder, f))
+    return files
 
 def normalize_name(name):
     return name.strip().lower() if name else "unknown"
@@ -84,11 +107,14 @@ def find_all_students(pgn_files, config):
         
     return final_students
 
-def generate_reports(global_stats):
-    logging.info("Создание отчетов (TXT)...")
+def generate_reports(global_stats, output_folder):
+    logging.info(f"Создание отчетов в папке {output_folder}...")
     for name, data in global_stats.items():
         safe = "".join([c for c in name if c.isalnum() or c in ' _-']).strip()
-        with open(f"Report_{safe}.txt", "w", encoding="utf-8") as f:
+        filename = f"Report_{safe}.txt"
+        full_path = os.path.join(output_folder, filename)
+        
+        with open(full_path, "w", encoding="utf-8") as f:
             f.write(f"ОТЧЕТ: {name}\n{'='*30}\n\n")
             
             f.write(f"1. ДЕБЮТ (Партий: {data['games']}):\n")
@@ -138,7 +164,6 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
         p_total = students_data.get(norm_name, '?')
         log_parts.append(f"[Ученик {s_idx}/{s_total}] {raw_name} ({p_curr}/{p_total})")
 
-    # Убрали "(Глобально)" из лога
     logging.info(f"Партия {gg_num}. {' | '.join(log_parts)}")
     
     # --- ИНИЦИАЛИЗАЦИЯ ---
@@ -172,12 +197,10 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
         
         should_analyze = (turn == chess.WHITE and an_white) or (turn == chess.BLACK and an_black)
 
-        # Пропуск хода (ход соперника)
         if not should_analyze:
             if turn in op_trackers and not op_trackers[turn]["checked"] and board.fullmove_number == 15:
                 rep = opening.check_opening_principles(op_trackers[turn], turn)
                 if rep:
-                    # Убрали [DEBUT]
                     msg = f"; {rep}" if next_node.comment else rep
                     next_node.comment = (next_node.comment + msg) if next_node.comment else msg
                     for k in ["не захватил центр", "не сделал рокировку", "не развил фигуры"]:
@@ -197,13 +220,11 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
             best_move = info["pv"][0]
             score = info["score"].relative
 
-            # === 1. СТРАТЕГИЯ (Записываем комментарии в PGN) ===
+            # === 1. СТРАТЕГИЯ ===
             strat_tags = registry.get_strategy_tags(board, move, best_move)
             if strat_tags:
                 for t in strat_tags:
                     global_stats[student_name]["strat_stats"][t] += 1
-                
-                # ДОБАВЛЕНИЕ КОММЕНТАРИЯ К ХОДУ
                 strat_comment = ", ".join(strat_tags)
                 if next_node.comment:
                     next_node.comment += f"; {strat_comment}"
@@ -224,7 +245,6 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
                 if turn in op_trackers and not op_trackers[turn]["checked"] and board.fullmove_number == 15:
                     rep = opening.check_opening_principles(op_trackers[turn], turn)
                     if rep:
-                        # Убрали [DEBUT]
                         msg = f"; {rep}" if next_node.comment else rep
                         next_node.comment = (next_node.comment + msg) if next_node.comment else msg
                         for k in ["не захватил центр", "не сделал рокировку", "не развил фигуры"]:
@@ -233,7 +253,7 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
                 
                 board.push(move); node = next_node; continue
 
-            # === 3. ТАКТИКА (При ошибках) ===
+            # === 3. ТАКТИКА ===
             mate_found = False
             if score.is_mate() and 0 < score.mate() <= config["mate_depth_trigger"]:
                 mate_in = score.mate()
@@ -260,7 +280,6 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
                 
                 if nag and diff >= config["error_threshold"]:
                     tags = registry.get_tactical_tags(board, move, best_move)
-                    
                     if tags:
                         for t in tags: global_stats[student_name]["tac_errors"][t] += 1
                         logging.info(f"   [x] Ошибка (Ход {board.fullmove_number}): {', '.join(tags)}")
@@ -270,19 +289,16 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
                         
                     next_node.nags.add(nag)
                     var = node.add_variation(best_move)
-                    
-                    # Комментарий к вариации может содержать и тактику, и стратегию (для контекста)
-                    all_comments = tags # Стратегия уже в main line
+                    all_comments = tags 
                     if all_comments: var.comment = ", ".join(all_comments)
 
         except Exception as e:
             logging.error(f"Move error: {e}")
 
-        # Дебют (повторная проверка)
+        # Дебют (повтор)
         if turn in op_trackers and not op_trackers[turn]["checked"] and board.fullmove_number == 15:
             rep = opening.check_opening_principles(op_trackers[turn], turn)
             if rep:
-                # Убрали [DEBUT]
                 msg = f"; {rep}" if next_node.comment else rep
                 next_node.comment = (next_node.comment + msg) if next_node.comment else msg
                 for k in ["не захватил центр", "не сделал рокировку", "не развил фигуры"]:
@@ -294,12 +310,32 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
     return True
 
 def main():
-    with open("chess_log.txt", "w", encoding="utf-8") as f: f.write("START\n")
     config = load_config()
-    files = get_pgn_files()
-    if not files: return
     
-    students_data = find_all_students(files, config)
+    # 1. Читаем пути из конфига (с дефолтами для безопасности)
+    input_folder = config.get("input_folder", "pgn")
+    output_folder = config.get("output_folder", "pgn_analyzed")
+    
+    # 2. Создаем папки, если их нет
+    if not os.path.exists(input_folder):
+        os.makedirs(input_folder, exist_ok=True)
+        print(f"Создана папка для входных файлов: {input_folder}")
+        
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder, exist_ok=True)
+        
+    # 3. Настраиваем логирование в папку вывода
+    setup_logging(output_folder)
+    
+    # 4. Получаем список файлов
+    pgn_files = get_pgn_files(input_folder)
+    
+    if not pgn_files:
+        logging.warning(f"Файлы PGN не найдены в папке '{input_folder}'.")
+        print(f"\n[!] Папка '{input_folder}' пуста. Добавьте туда файлы .pgn и запустите снова.")
+        return
+    
+    students_data = find_all_students(pgn_files, config)
     if not students_data: return
     
     sorted_students = sorted(students_data.keys())
@@ -325,12 +361,16 @@ def main():
         
     global_stats = {}
     
-    for f in files:
-        base = os.path.splitext(f)[0]
-        out = f"{base}_analyze.pgn"
-        logging.info(f"=== Файл: {f} ===")
+    for f in pgn_files:
+        filename = os.path.basename(f)
+        base = os.path.splitext(filename)[0]
         
-        with open(f, "r", encoding="utf-8", errors="replace") as pin, open(out, "w", encoding="utf-8") as pout:
+        # Сохраняем в output_folder
+        out_path = os.path.join(output_folder, f"{base}_analyze.pgn")
+        
+        logging.info(f"=== Файл: {filename} ===")
+        
+        with open(f, "r", encoding="utf-8", errors="replace") as pin, open(out_path, "w", encoding="utf-8") as pout:
             exp = chess.pgn.FileExporter(pout)
             while True:
                 g = chess.pgn.read_game(pin)
@@ -339,8 +379,9 @@ def main():
                     g.accept(exp)
                     
     engine.quit()
-    generate_reports(global_stats)
-    logging.info("DONE")
+    generate_reports(global_stats, output_folder)
+    logging.info(f"ВСЕ ГОТОВО. Результаты в папке: {output_folder}")
+    print(f"\nАнализ завершен. Результаты в папке: {output_folder}")
 
 if __name__ == "__main__":
     main()

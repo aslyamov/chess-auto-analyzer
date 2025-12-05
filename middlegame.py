@@ -81,5 +81,21 @@ def missed_open_file(board, best_move, user_move):
         sq = chess.square(best_file, rank)
         if board.piece_type_at(sq) == chess.PAWN:
             return False
+    
+    # 4. (НОВОЕ) Проверяем, стоит ли УЖЕ наша тяжелая фигура на этой линии?
+    # Если да, то мы уже контролируем линию, и это не ошибка "Не занял".
+    my_color = board.turn
+    has_heavy_piece_on_file = False
+    
+    for rank in range(8):
+        sq = chess.square(best_file, rank)
+        p = board.piece_at(sq)
+        # Если на линии стоит НАША Ладья или Ферзь
+        if p and p.color == my_color and p.piece_type in [chess.ROOK, chess.QUEEN]:
+            has_heavy_piece_on_file = True
+            break
+            
+    if has_heavy_piece_on_file:
+        return False
             
     return True
