@@ -19,6 +19,9 @@
     * Зевок фигуры (Hanging Piece)
     * Подставка под бой (Moving into Danger)
     * Упущенный мат (Missed Mate)
+    * Ловля фигуры (Trapped Piece)
+    * Жертва (Sacrifice)
+    * Уничтожение защитника (Removing the Defender)
 
 * **Стратегия и Миттельшпиль (NEW):**
     * Создание сдвоенных пешек (Doubled Pawns)

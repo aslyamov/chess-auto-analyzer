@@ -15,6 +15,9 @@ TACTICAL_CHECKS = [
     (tactics.is_discovered_check, "Вскрытый шах"),
     (tactics.is_discovered_attack, "Вскрытое нападение"),
     (tactics.is_missed_hanging_piece, "Не забрал фигуру"),
+    (tactics.is_sacrifice, "Жертва"),
+    (tactics.is_removing_the_defender, "Уничтожение защитника"),
+    (tactics.is_trapped_piece, "Ловля фигуры"),
 ]
 
 # СТРАТЕГИЯ (Strategy) - Проверяем ВСЕГДА (стиль игры)
