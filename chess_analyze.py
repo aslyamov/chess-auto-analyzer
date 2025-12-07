@@ -36,7 +36,6 @@ def load_config(path="config.json"):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        # Здесь логгер еще не настроен, пишем просто в консоль
         print(f"[CRITICAL] Не удалось загрузить конфиг: {e}")
         sys.exit(1)
 
@@ -52,7 +51,6 @@ def get_pgn_files(input_folder):
 
     for f in os.listdir(input_folder):
         if f.endswith(".pgn"):
-            # Формируем полный путь
             files.append(os.path.join(input_folder, f))
     return files
 
@@ -218,7 +216,9 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
                 board.push(move); node = next_node; continue
 
             best_move = info["pv"][0]
-            score = info["score"].relative
+            
+            # Объект PovScore (относительная оценка)
+            best_score_obj = info["score"] 
 
             # === 1. СТРАТЕГИЯ ===
             strat_tags = registry.get_strategy_tags(board, move, best_move)
@@ -232,7 +232,7 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
                     next_node.comment = strat_comment
 
             # === 2. ТЕХНИКА ===
-            if middlegame.check_technical_conversion(score, 1000, result, turn, (turn == chess.WHITE)):
+            if middlegame.check_technical_conversion(best_score_obj, 1000, result, turn, (turn == chess.WHITE)):
                 if not tech_advantage_flag[turn]:
                     tech_advantage_flag[turn] = True
                     global_stats[student_name]["tech_errors"] += 1
@@ -256,39 +256,43 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
             # === 3. ТАКТИКА И МАТ ===
             mate_found = False
             
-            # --- УПУЩЕННЫЙ МАТ (ИСПРАВЛЕНО: ПИШЕМ ПОЛНЫЙ ВАРИАНТ) ---
-            if score.is_mate() and 0 < score.mate() <= config["mate_depth_trigger"]:
-                mate_in = score.mate()
-                board.push(move); board.pop()
-                u_info = engine.analyse(board, limit, root_moves=[move])
-                u_score = u_info["score"].relative
-                u_mate = u_score.mate() if u_score.is_mate() else 0
+            # --- УПУЩЕННЫЙ МАТ ---
+            if best_score_obj.is_mate():
+                # ИСПРАВЛЕНИЕ: берем .pov(turn).mate() вместо прямого .mate()
+                mate_in = best_score_obj.pov(turn).mate()
                 
-                if not u_score.is_mate() or (u_mate > 0 and u_mate > mate_in):
-                    lbl = f"Не нашел мат в {mate_in}"
-                    global_stats[student_name]["tac_errors"][lbl] += 1
+                # Ищем мат только если он для нас положительный (мы выигрываем)
+                if mate_in > 0 and mate_in <= config["mate_depth_trigger"]:
+                    board.push(move); board.pop()
+                    u_info = engine.analyse(board, limit, root_moves=[move])
+                    u_score_obj = u_info["score"]
                     
-                    next_node.nags.add(chess.pgn.NAG_BLUNDER)
+                    # ИСПРАВЛЕНИЕ: здесь тоже .pov(turn).mate()
+                    u_mate = u_score_obj.pov(turn).mate() if u_score_obj.is_mate() else 0
                     
-                    # 1. Создаем вариацию с первым ходом
-                    var_node = node.add_variation(best_move)
-                    
-                    # 2. Дописываем остальные ходы из PV (Principal Variation)
-                    if "pv" in info and len(info["pv"]) > 1:
-                        current_var = var_node
-                        for pv_move in info["pv"][1:]:
-                            current_var = current_var.add_main_variation(pv_move)
-                    
-                    var_node.comment = utils.get_mate_comment(mate_in)
-                    mate_found = True
+                    if not u_score_obj.is_mate() or (u_mate > 0 and u_mate > mate_in):
+                        lbl = f"Не нашел мат в {mate_in}"
+                        global_stats[student_name]["tac_errors"][lbl] += 1
+                        
+                        next_node.nags.add(chess.pgn.NAG_BLUNDER)
+                        
+                        var_node = node.add_variation(best_move)
+                        if "pv" in info and len(info["pv"]) > 1:
+                            current_var = var_node
+                            for pv_move in info["pv"][1:]:
+                                current_var = current_var.add_main_variation(pv_move)
+                        
+                        var_node.comment = utils.get_mate_comment(mate_in)
+                        mate_found = True
 
-            # --- ОБЫЧНЫЕ ОШИБКИ (ТОЖЕ ПИШЕМ ПОЛНЫЙ ВАРИАНТ) ---
+            # --- ОБЫЧНЫЕ ОШИБКИ ---
             if not mate_found:
                 board.push(move); board.pop()
                 u_info = engine.analyse(board, limit, root_moves=[move])
-                u_score = u_info["score"].relative
+                u_score_obj = u_info["score"]
                 
-                diff = utils.calculate_score_difference(score, u_score, turn, config["mate_score"])
+                # Передаем объекты PovScore в utils, там они корректно обрабатываются
+                diff = utils.calculate_score_difference(best_score_obj, u_score_obj, turn, config["mate_score"])
                 nag = utils.get_error_type(diff, config)
                 
                 if nag and diff >= config["error_threshold"]:
@@ -303,15 +307,11 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
                         
                     next_node.nags.add(nag)
                     
-                    # 1. Создаем вариацию с первым ходом
                     var_node = node.add_variation(best_move)
-                    
-                    # 2. Дописываем вариант (чтобы видеть, как именно выигрывается фигура)
-                    # Ограничим длину 5-6 ходами, чтобы не засорять PGN слишком длинными вариантами
                     if "pv" in info and len(info["pv"]) > 1:
                         current_var = var_node
                         for i, pv_move in enumerate(info["pv"][1:]):
-                            if i > 5: break # Максимум 6 полуходов (3 полных хода)
+                            if i > 5: break 
                             current_var = current_var.add_main_variation(pv_move)
                     
                     all_comments = tags 
@@ -320,7 +320,7 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
         except Exception as e:
             logging.error(f"Move error: {e}")
 
-        # Дебют (повтор)
+        # Дебют (повтор логики)
         if turn in op_trackers and not op_trackers[turn]["checked"] and board.fullmove_number == 15:
             rep = opening.check_opening_principles(op_trackers[turn], turn)
             if rep:
@@ -337,11 +337,9 @@ def process_game(game, engine, config, students_data, global_stats, tracking_inf
 def main():
     config = load_config()
     
-    # 1. Читаем пути из конфига (с дефолтами для безопасности)
     input_folder = config.get("input_folder", "pgn")
     output_folder = config.get("output_folder", "pgn_analyzed")
     
-    # 2. Создаем папки, если их нет
     if not os.path.exists(input_folder):
         os.makedirs(input_folder, exist_ok=True)
         print(f"Создана папка для входных файлов: {input_folder}")
@@ -349,10 +347,8 @@ def main():
     if not os.path.exists(output_folder):
         os.makedirs(output_folder, exist_ok=True)
         
-    # 3. Настраиваем логирование в папку вывода
     setup_logging(output_folder)
     
-    # 4. Получаем список файлов
     pgn_files = get_pgn_files(input_folder)
     
     if not pgn_files:
@@ -389,8 +385,6 @@ def main():
     for f in pgn_files:
         filename = os.path.basename(f)
         base = os.path.splitext(filename)[0]
-        
-        # Сохраняем в output_folder
         out_path = os.path.join(output_folder, f"{base}_analyze.pgn")
         
         logging.info(f"=== Файл: {filename} ===")

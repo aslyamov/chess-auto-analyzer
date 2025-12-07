@@ -26,18 +26,25 @@ def get_error_type(cp_loss, config):
     return None
 
 def calculate_score_difference(engine_score, move_score, turn, mate_value):
-    """Считает разницу оценки (потерю) между лучшим ходом и ходом игрока."""
-    engine_cp = engine_score.score(mate_score=mate_value)
-    move_cp = move_score.score(mate_score=mate_value)
+    """
+    Считает разницу оценки (потерю) с использованием PovScore.
+    engine_score и move_score — это объекты PovScore из python-chess.
+    """
+    # 1. Приводим обе оценки к точке зрения игрока, который делал ход (turn)
+    # Если turn=Black, а оценка -5.0 (значит выигрывают черные), 
+    # то pov(Black) вернет +5.0 (хорошо для игрока).
     
-    if engine_cp is None or move_cp is None:
+    best_val = engine_score.pov(turn).score(mate_score=mate_value)
+    actual_val = move_score.pov(turn).score(mate_score=mate_value)
+    
+    if best_val is None or actual_val is None:
         return 0
-        
-    if turn == chess.WHITE:
-        diff = engine_cp - move_cp
-    else:
-        diff = move_cp - engine_cp
-        
+    
+    # 2. Теперь математика всегда одинаковая: Лучшее - Реальное
+    diff = best_val - actual_val
+    
+    # Округляем отрицательные значения (иногда движок на малых глубинах 
+    # может оценить ход человека чуть выше своего "лучшего", это шум)
     return max(0, diff)
 
 def get_mate_comment(mate_turns):

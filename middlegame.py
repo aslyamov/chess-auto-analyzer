@@ -1,19 +1,24 @@
 import chess
 
 # === ТЕХНИЧЕСКАЯ ПОЗИЦИЯ ===
-def check_technical_conversion(score, advantage_threshold, game_result, current_turn, is_white_student):
+def check_technical_conversion(score_object, advantage_threshold, game_result, current_turn, is_white_student):
     """
-    Проверяет, было ли у нас огромное преимущество (>1000cp), которое мы не реализовали (не выиграли).
+    Проверяет, было ли у нас огромное преимущество (>1000cp), которое мы не реализовали.
+    Принимает score_object (PovScore).
     """
     # Если результат - победа ученика, ошибки нет
     if game_result == "1-0" and is_white_student: return False
     if game_result == "0-1" and not is_white_student: return False
     
-    cp = score.score(mate_score=10000)
+    # Определяем цвет ученика в текущий момент (совпадает с current_turn)
+    # Если ход белых (current_turn), и ученик играет белыми, то perspective = White
+    
+    # Получаем оценку с точки зрения ТЕКУЩЕГО игрока
+    cp = score_object.pov(current_turn).score(mate_score=10000)
+    
     if cp is None: return False
     
-    # Если оценка >= порога (например 1000), значит у нас выиграно.
-    # Но так как мы не выиграли партию (проверка выше), возвращаем True (Ошибка).
+    # Если оценка >= порога (например +10.0 пешек ДЛЯ МЕНЯ), а я не выиграл
     if cp >= advantage_threshold:
         return True
     return False
